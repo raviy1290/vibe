@@ -104,6 +104,111 @@ def test_edit_preview_returns_diff(registry, ctx, tmp_path):
     assert "-a = 1" in diff and "+a = 2" in diff
 
 
+def test_edit_noop_identical(registry, ctx, tmp_path):
+    (tmp_path / "f.py").write_text("a = 1\n")
+    with pytest.raises(ToolError, match="identical"):
+        call(registry, "edit_file", ctx, path="f.py",
+             old_string="a = 1", new_string="a = 1")
+
+
+def test_edit_missing_target(registry, ctx, tmp_path):
+    (tmp_path / "f.py").write_text("a = 1\n")
+    with pytest.raises(ToolError, match="empty"):
+        call(registry, "edit_file", ctx, path="f.py")
+
+
+# -- edit: whitespace-tolerant (fuzzy) matching ---------------------------
+
+def test_edit_fuzzy_trailing_whitespace(registry, ctx, tmp_path):
+    # No exact match (model added trailing spaces), but the line matches once.
+    (tmp_path / "f.py").write_text("x = 1\ny = 2\n")
+    call(registry, "edit_file", ctx, path="f.py",
+         old_string="x = 1   ", new_string="x = 11")
+    assert (tmp_path / "f.py").read_text() == "x = 11\ny = 2\n"
+
+
+def test_edit_fuzzy_indentation_multiline(registry, ctx, tmp_path):
+    # Model under-indents a two-line block; stripped lines still match uniquely.
+    (tmp_path / "f.py").write_text("def f():\n    a = 1\n    b = 2\n")
+    call(registry, "edit_file", ctx, path="f.py",
+         old_string="  a = 1\n  b = 2", new_string="  a = 10\n  b = 20")
+    assert (tmp_path / "f.py").read_text() == "def f():\n  a = 10\n  b = 20\n"
+
+
+def test_edit_fuzzy_ambiguous_refuses(registry, ctx, tmp_path):
+    # Two whitespace-equal candidates: refuse rather than guess a location.
+    (tmp_path / "f.py").write_text("a = 1\na = 1\n")
+    with pytest.raises(ToolError, match="not found"):
+        call(registry, "edit_file", ctx, path="f.py",
+             old_string="a = 1 ", new_string="a = 2")
+
+
+def test_edit_did_you_mean_hint(registry, ctx, tmp_path):
+    # A near-miss should point the model at the closest real line.
+    (tmp_path / "f.py").write_text("def go():\n    result = compute(x)\n")
+    with pytest.raises(ToolError, match="Closest line"):
+        call(registry, "edit_file", ctx, path="f.py",
+             old_string="result = kompute(x)", new_string="result = compute(y)")
+
+
+# -- edit: batched multi-edit ---------------------------------------------
+
+def test_edit_batch(registry, ctx, tmp_path):
+    (tmp_path / "f.py").write_text("a = 1\nb = 2\n")
+    call(registry, "edit_file", ctx, path="f.py",
+         edits=[{"old_string": "a = 1", "new_string": "a = 10"},
+                {"old_string": "b = 2", "new_string": "b = 20"}])
+    assert (tmp_path / "f.py").read_text() == "a = 10\nb = 20\n"
+
+
+def test_edit_batch_applies_in_order(registry, ctx, tmp_path):
+    # The second edit targets text the first one produced.
+    (tmp_path / "f.py").write_text("value = 1\n")
+    call(registry, "edit_file", ctx, path="f.py",
+         edits=[{"old_string": "value = 1", "new_string": "value = 2"},
+                {"old_string": "value = 2", "new_string": "value = 3"}])
+    assert (tmp_path / "f.py").read_text() == "value = 3\n"
+
+
+def test_edit_batch_result_counts(registry, ctx, tmp_path):
+    (tmp_path / "f.py").write_text("a = 1\nb = 2\n")
+    out = call(registry, "edit_file", ctx, path="f.py",
+               edits=[{"old_string": "a = 1", "new_string": "a = 9"},
+                      {"old_string": "b = 2", "new_string": "b = 9"}])
+    assert "2 edits" in out
+
+
+def test_edit_batch_one_failure_aborts(registry, ctx, tmp_path):
+    # If any edit can't apply, the file is left untouched.
+    (tmp_path / "f.py").write_text("a = 1\nb = 2\n")
+    with pytest.raises(ToolError):
+        call(registry, "edit_file", ctx, path="f.py",
+             edits=[{"old_string": "a = 1", "new_string": "a = 9"},
+                    {"old_string": "nope", "new_string": "x"}])
+    assert (tmp_path / "f.py").read_text() == "a = 1\nb = 2\n"
+
+
+def test_edit_batch_preview(registry, ctx, tmp_path):
+    (tmp_path / "f.py").write_text("a = 1\nb = 2\n")
+    tool = registry.get("edit_file")
+    diff = tool.preview({"path": "f.py",
+                         "edits": [{"old_string": "a = 1", "new_string": "a = 9"},
+                                   {"old_string": "b = 2", "new_string": "b = 9"}]}, ctx)
+    assert "+a = 9" in diff and "+b = 9" in diff
+
+
+def test_edit_empty_edits_list(registry, ctx, tmp_path):
+    (tmp_path / "f.py").write_text("a = 1\n")
+    with pytest.raises(ToolError, match="empty"):
+        call(registry, "edit_file", ctx, path="f.py", edits=[])
+
+
+def test_edit_edits_wrong_type(registry, ctx, tmp_path):
+    (tmp_path / "f.py").write_text("a = 1\n")
+    with pytest.raises(ToolError, match="list"):
+        call(registry, "edit_file", ctx, path="f.py", edits="a = 1")
+
+
 # -- grep -----------------------------------------------------------------
 
 def test_grep_finds_match(registry, ctx, tmp_path):

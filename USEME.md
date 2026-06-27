@@ -196,17 +196,28 @@ When you're done, press **Ctrl-D** (or `/exit`).
 
 ### A note on local-model reality
 
-Everything above was run on `qwen2.5-coder:7b` and **works as shown**. But the
-size of the model matters for the size of the edit. When this same example asked
-the 7B model for a *conditional-logic* edit ("add a `--json` flag that prints
-JSON when set"), it added the argparse flag but then **looped** trying to wire
-the `if` branch and hit vibe's 25-iteration safety cap without finishing.
+Everything above was run on `qwen2.5-coder:7b` and **works as shown**. The size
+of the model still matters for the size of the edit. Originally, when this same
+example asked the 7B model for a *conditional-logic* edit ("add a `--json` flag
+that prints JSON when set"), it added the argparse flag but then **looped**
+trying to wire the `if` branch and hit vibe's 25-iteration safety cap without
+finishing.
 
-Takeaways, all real:
-- 7B is reliable for **create a file**, **run a command**, and **single-string
-  edits**. Keep each step that small.
-- For **multi-line / conditional edits**, either break them into smaller single
-  edits, or size up: `vibe --model qwen2.5-coder:14b` (no code changes).
+vibe has since gained three changes aimed squarely at that failure mode:
+- **Batched edits** — `edit_file` accepts an `edits` list, so a multi-part
+  change (add the flag *and* wire the `if`) goes in one call instead of several
+  fragile round-trips.
+- **Whitespace-tolerant matching** — an `old_string` whose indentation or
+  trailing spaces are slightly off still matches, and a near-miss returns the
+  closest line as a hint, so the model recovers in one step.
+- **Plan-first** — for anything multi-step the agent drafts a short numbered
+  plan before touching code, which keeps it from drifting.
+
+Together these make multi-part edits land far more often on 7B. Takeaways:
+- 7B is reliable for **create a file**, **run a command**, and **focused edits**
+  (single or batched). Keep each step small and well-scoped.
+- For the **hardest conditional edits**, a bigger model still helps: size up
+  with `vibe --model qwen2.5-coder:14b` (no code changes).
 - The 25-iteration cap is a feature — a stuck model stops instead of running
   forever.
 
@@ -221,8 +232,10 @@ Takeaways, all real:
 - **Trust the diffs.** Every write/edit/bash shows a preview — actually read it
   before pressing `y`. It's your safety net.
 - **Use `/auto` sparingly.** Great for a scratch project, risky on real code.
-- **One edit at a time.** Single-string edits land reliably on 7B;
-  conditional-logic edits often need a bigger model (see the reality note above).
+- **Batch related edits.** For a multi-part change, vibe can apply several
+  find-and-replaces in one `edit_file` call (an `edits` list) — more reliable
+  than many separate edits. Small whitespace differences are tolerated, and a
+  near-miss suggests the closest line (see the reality note above).
 - **If it feels dumb, size up the model:** `/model qwen2.5-coder:14b` mid-session,
   or launch with `vibe --model qwen2.5-coder:14b`. No code changes needed.
 - **Different models, same agent.** `llama3.2` uses native tool-calls;

@@ -89,8 +89,14 @@ The model never touches your files directly. It can only ask to use one of
 
 Small models are easy to trip up, so vibe makes a few deliberate choices:
 
-- **Edits are exact find-and-replace, not full rewrites** — the model swaps one
-  specific snippet, so it can't accidentally mangle the rest of a file.
+- **Edits are find-and-replace, not full rewrites** — the model swaps one
+  specific snippet, so it can't accidentally mangle the rest of a file. Small
+  indentation/whitespace slips are tolerated, and a near-miss gets a *"did you
+  mean this line?"* hint so the model can fix it in one step instead of looping.
+- **Several edits in one call** — it can batch multiple find-and-replaces into a
+  single `edit_file`, so multi-part changes don't dissolve into a loop.
+- **It plans before multi-step work** — for anything beyond a one-liner it
+  writes a short numbered plan first, then executes it step by step.
 - **It must read a file before editing it** (enforced in the prompt).
 - **It stays inside your project folder** — any attempt to touch a file outside
   is blocked before it happens.
