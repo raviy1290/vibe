@@ -251,9 +251,12 @@ Together these make multi-part edits land far more often on 7B. Takeaways:
 | Pick a model | `vibe --model llama3.2` |
 | Skip confirmations | `vibe --auto` |
 | Point at a remote Ollama | `vibe --host http://HOST:11434` |
+| Trace the reasoning live | `vibe -v` (readable) / `vibe -vv` (full payloads) |
+| Save a replayable trace | `vibe --trace` (JSONL in `~/.vibe/traces/`) |
 | In-session: help / tools | `/help`, `/tools` |
 | In-session: switch model | `/model NAME` (or `/model list`) |
 | In-session: toggle auto-approve | `/auto` |
+| In-session: set trace level | `/verbose 0\|1\|2` |
 | In-session: clear history | `/clear` |
 | In-session: quit | `/exit` or Ctrl-D |
 

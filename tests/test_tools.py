@@ -5,15 +5,19 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from vibe.agent.loop import parse_text_tool_calls
+from vibe.agent.loop import Agent, parse_text_tool_calls
 from vibe.config import Config
 from vibe.errors import ToolError
+from vibe.llm.ollama import ChatResult, ToolCall
 from vibe.safety import resolve_in_root
 from vibe.tools.base import ToolContext, build_default_registry
+from vibe.trace import JsonlSink, Tracer, build_tracer
+from vibe.ui.render import UI
 
 
 @pytest.fixture
@@ -260,3 +264,119 @@ def test_parse_text_tool_calls_ignores_non_tool_blocks():
 def test_parse_text_tool_calls_bare_json():
     calls = parse_text_tool_calls('{"name": "grep", "arguments": {"pattern": "x"}}')
     assert len(calls) == 1 and calls[0].name == "grep"
+
+
+# -- reasoning trace ------------------------------------------------------
+
+class StubClient:
+    """A fake OllamaClient that replays scripted ChatResults — no Ollama."""
+
+    def __init__(self, scripted: list[ChatResult], model: str = "stub") -> None:
+        self.model = model
+        self._scripted = list(scripted)
+
+    def chat(self, messages, tools=None, on_text=None):
+        return self._scripted.pop(0)
+
+
+def _read_only_call(name, args):
+    return ToolCall(name, args, {"function": {"name": name, "arguments": args}})
+
+
+def _drive(tmp_path, scripted, trace_file, auto=True):
+    config = Config(project_root=tmp_path, auto_approve=auto)
+    ctx = ToolContext(project_root=tmp_path, config=config)
+    registry = build_default_registry(ctx)
+    tracer = Tracer([JsonlSink(trace_file)])
+    agent = Agent(StubClient(scripted), registry, ctx, UI(), tracer=tracer)
+    agent.run_turn("what is in f.py?")
+    tracer.close()
+    return [json.loads(line) for line in trace_file.read_text().splitlines()]
+
+
+def test_trace_records_reasoning_trajectory(tmp_path):
+    (tmp_path / "f.py").write_text("a = 1\n")
+    scripted = [
+        ChatResult(
+            content="I'll read f.py first.",
+            tool_calls=[_read_only_call("read_file", {"path": "f.py"})],
+            raw_tool_calls=[{"function": {"name": "read_file",
+                                          "arguments": {"path": "f.py"}}}],
+            stats={"prompt_eval_count": 100, "eval_count": 12,
+                   "total_duration": 1_500_000_000},
+        ),
+        ChatResult(content="The file holds a = 1.", stats={"eval_count": 8}),
+    ]
+    records = _drive(tmp_path, scripted, tmp_path / "trace.jsonl")
+    kinds = [r["kind"] for r in records]
+
+    # the full intent -> action -> observation trajectory is present
+    assert kinds.count("llm_request") == 2
+    assert {"llm_response", "interpretation", "observation"} <= set(kinds)
+    assert kinds[-1] == "turn_end"
+
+    resp = next(r for r in records if r["kind"] == "llm_response")
+    assert resp["reasoning"] == "I'll read f.py first."
+    assert resp["prompt_tokens"] == 100 and resp["gen_tokens"] == 12
+    assert resp["seconds"] == 1.5
+
+    interp = next(r for r in records if r["kind"] == "interpretation")
+    assert interp["source"] == "native"
+    assert interp["calls"][0]["tool"] == "read_file"
+
+    obs = next(r for r in records if r["kind"] == "observation")
+    assert obs["tool"] == "read_file" and obs["is_error"] is False
+    assert obs["chars"] > 0
+
+    assert "final answer" in records[-1]["reason"]
+
+
+def test_trace_marks_text_parsed_source(tmp_path):
+    scripted = [
+        ChatResult(content='```json\n{"name": "list_dir", "arguments": {}}\n```'),
+        ChatResult(content="done"),
+    ]
+    records = _drive(tmp_path, scripted, tmp_path / "trace.jsonl")
+    interp = next(r for r in records if r["kind"] == "interpretation")
+    assert interp["source"] == "text-parsed"
+    assert interp["calls"][0]["tool"] == "list_dir"
+
+
+def test_trace_records_tool_error(tmp_path):
+    # editing a missing file should be observed as an error, not crash the trace
+    scripted = [
+        ChatResult(
+            content="editing",
+            tool_calls=[_read_only_call("edit_file",
+                                        {"path": "nope.py", "old_string": "a",
+                                         "new_string": "b"})],
+            raw_tool_calls=[{"function": {"name": "edit_file", "arguments": {}}}],
+        ),
+        ChatResult(content="could not edit"),
+    ]
+    records = _drive(tmp_path, scripted, tmp_path / "trace.jsonl")
+    obs = next(r for r in records if r["kind"] == "observation")
+    assert obs["is_error"] is True
+
+
+def test_tracer_without_sinks_is_noop():
+    calls = []
+    Tracer().emit("llm_request", 0, model="x")  # must not raise
+    assert calls == []
+
+
+def test_console_sink_renders_all_kinds(capsys):
+    tracer = build_tracer(verbosity=2)
+    tracer.emit("llm_request", 0, model="m", messages=2, tools=6,
+                sent=[{"role": "user", "content": "hi [not markup]"}])
+    tracer.emit("llm_response", 0, reasoning="thinking", tool_calls=1,
+                raw_tool_calls=[{"x": 1}], prompt_tokens=5, gen_tokens=3, seconds=0.2)
+    tracer.emit("interpretation", 0, source="native",
+                calls=[{"tool": "read_file", "args": {"path": "x"}}])
+    tracer.emit("observation", 0, tool="read_file", chars=10, is_error=False,
+                result="data")
+    tracer.emit("turn_end", 0, reason="final answer")
+    err = capsys.readouterr().err
+    assert "POST /api/chat" in err
+    assert "reasoning" in err and "thinking" in err
+    assert "read_file" in err and "final answer" in err

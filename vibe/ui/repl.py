@@ -21,6 +21,7 @@ Commands:
   /tools           list available tools
   /model [name]    show or switch the Ollama model (/model list to enumerate)
   /auto            toggle auto-approve (skip confirmations) for this session
+  /verbose [0-2]   set the live reasoning trace level (0 off, 1 readable, 2 full)
   /clear           clear the conversation history
   /exit, /quit     leave vibe (or press Ctrl-D)
 Anything else is sent to the agent.\
@@ -78,6 +79,10 @@ class Repl:
             self.config.auto_approve = not self.config.auto_approve
             state = "ON" if self.config.auto_approve else "OFF"
             self.ui.warn(f"auto-approve is now {state}")
+        elif cmd == "/verbose":
+            level = int(args[0]) if args and args[0].isdigit() else 1
+            self.agent.tracer.set_console_level(level)
+            self.ui.warn(f"reasoning trace level = {min(level, 2)}")
         elif cmd == "/clear":
             self.agent.reset()
             self.ui.info("conversation cleared")

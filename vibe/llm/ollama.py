@@ -43,6 +43,8 @@ class ChatResult:
     content: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     raw_tool_calls: list[dict] = field(default_factory=list)
+    # Stats from Ollama's final stream chunk (tokens + timing), when present.
+    stats: dict = field(default_factory=dict)
 
 
 def _normalize_arguments(args) -> dict:
@@ -127,6 +129,12 @@ class OllamaClient:
 
         if "error" in chunk:
             raise LLMError(chunk["error"])
+
+        # The final chunk (done=true) carries token counts + timing at top level.
+        if chunk.get("done"):
+            for key in ("total_duration", "prompt_eval_count", "eval_count"):
+                if key in chunk:
+                    result.stats[key] = chunk[key]
 
         msg = chunk.get("message") or {}
         text = msg.get("content") or ""

@@ -20,6 +20,7 @@ import re
 from ..errors import ToolError
 from ..llm.ollama import OllamaClient, ToolCall
 from ..tools.base import ToolContext, ToolRegistry
+from ..trace import Tracer
 from ..ui.render import UI
 from .prompt import build_system_prompt
 
@@ -76,11 +77,12 @@ def parse_text_tool_calls(content: str) -> list[ToolCall]:
 
 class Agent:
     def __init__(self, client: OllamaClient, registry: ToolRegistry,
-                 ctx: ToolContext, ui: UI):
+                 ctx: ToolContext, ui: UI, tracer: Tracer | None = None):
         self.client = client
         self.registry = registry
         self.ctx = ctx
         self.ui = ui
+        self.tracer = tracer or Tracer()
         self.messages: list[dict] = [
             {"role": "system",
              "content": build_system_prompt(ctx, registry.names())}
@@ -96,13 +98,26 @@ class Agent:
     def run_turn(self, user_input: str) -> None:
         self.messages.append({"role": "user", "content": user_input})
 
-        for _ in range(self.ctx.config.max_iterations):
+        schemas = self.registry.schemas()
+        for i in range(self.ctx.config.max_iterations):
+            self.tracer.emit("llm_request", i, model=self.client.model,
+                             messages=len(self.messages), tools=len(schemas),
+                             sent=self.messages)
             result = self.client.chat(
                 self.messages,
-                tools=self.registry.schemas(),
+                tools=schemas,
                 on_text=self.ui.stream_assistant,
             )
             self.ui.end_assistant()
+
+            stats = result.stats
+            seconds = (round(stats["total_duration"] / 1e9, 2)
+                       if stats.get("total_duration") else None)
+            self.tracer.emit("llm_response", i, reasoning=result.content,
+                             tool_calls=len(result.tool_calls),
+                             raw_tool_calls=result.raw_tool_calls,
+                             prompt_tokens=stats.get("prompt_eval_count"),
+                             gen_tokens=stats.get("eval_count"), seconds=seconds)
 
             assistant_msg: dict = {"role": "assistant", "content": result.content}
             if result.raw_tool_calls:
@@ -110,22 +125,32 @@ class Agent:
             self.messages.append(assistant_msg)
 
             tool_calls = result.tool_calls
+            source = "native"
             if not tool_calls:
                 tool_calls = parse_text_tool_calls(result.content)
+                source = "text-parsed"
             if not tool_calls:
+                self.tracer.emit("turn_end", i,
+                                 reason="final answer — no tool calls")
                 return  # final answer — hand control back to the user
 
+            self.tracer.emit("interpretation", i, source=source,
+                             calls=[{"tool": c.name, "args": c.arguments}
+                                    for c in tool_calls])
             for call in tool_calls:
-                self._execute(call)
+                self._execute(call, i)
 
         self.ui.warn("Reached the max tool-iteration limit; stopping this turn.")
+        self.tracer.emit("turn_end", self.ctx.config.max_iterations - 1,
+                         reason="max iterations reached")
 
     # -- one tool call -----------------------------------------------------
 
-    def _execute(self, call: ToolCall) -> None:
+    def _execute(self, call: ToolCall, iteration: int = 0) -> None:
         tool = self.registry.get(call.name)
         if tool is None:
-            self._record_result(call, f"Error: unknown tool '{call.name}'.")
+            self._record_result(call, f"Error: unknown tool '{call.name}'.",
+                                iteration, is_error=True)
             return
 
         self.ui.show_tool_call(call.name, call.arguments)
@@ -133,23 +158,27 @@ class Agent:
             if tool.requires_confirmation and not self.ctx.config.auto_approve:
                 preview = tool.preview(call.arguments, self.ctx) if tool.preview else None
                 if not self.ui.confirm(call.name, preview):
-                    self._record_result(call, "User declined this action.")
+                    self._record_result(call, "User declined this action.",
+                                        iteration, is_error=True)
                     return
             output = tool.handler(call.arguments, self.ctx)
         except ToolError as e:
             self.ui.show_tool_result(call.name, f"Error: {e}", is_error=True)
-            self._record_result(call, f"Error: {e}")
+            self._record_result(call, f"Error: {e}", iteration, is_error=True)
             return
         except KeyError as e:
             msg = f"Error: missing required argument {e}"
             self.ui.show_tool_result(call.name, msg, is_error=True)
-            self._record_result(call, msg)
+            self._record_result(call, msg, iteration, is_error=True)
             return
 
         self.ui.show_tool_result(call.name, output)
-        self._record_result(call, output)
+        self._record_result(call, output, iteration)
 
-    def _record_result(self, call: ToolCall, content: str) -> None:
+    def _record_result(self, call: ToolCall, content: str, iteration: int = 0,
+                       is_error: bool = False) -> None:
+        self.tracer.emit("observation", iteration, tool=call.name,
+                         chars=len(content), is_error=is_error, result=content)
         self.messages.append(
             {"role": "tool", "tool_name": call.name, "content": content}
         )

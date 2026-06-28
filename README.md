@@ -54,6 +54,8 @@ vibe                      # start an interactive chat in the current folder
 vibe "list the files"     # run a single request, then exit
 vibe --model llama3.2     # use a different local model
 vibe --auto               # don't ask before each change (handy for throwaway code)
+vibe -v                   # show the reasoning trace live (-vv for full detail)
+vibe --trace              # also save a replayable JSONL trace of the session
 ```
 
 Inside a session, type a slash command:
@@ -64,6 +66,7 @@ Inside a session, type a slash command:
 | `/tools` | show what the agent can do |
 | `/model [name]` | switch model (`/model list` to see options) |
 | `/auto` | toggle skipping confirmations |
+| `/verbose [0-2]` | set the live reasoning trace level |
 | `/clear` | start a fresh conversation |
 | `/exit` | quit (or press Ctrl-D) |
 
@@ -103,6 +106,33 @@ Small models are easy to trip up, so vibe makes a few deliberate choices:
 - **It works in front of you** — every write, edit, or command shows a preview
   and waits for your `y`.
 
+## Watching the model reason
+
+These local models have no hidden "thoughts" — their reasoning *is* the text they
+emit plus the sequence of tools they choose. `vibe` can show you that trajectory:
+
+```bash
+vibe -v "summarise tasks.py"     # readable trace on stderr
+vibe -vv ...                     # full payloads (messages sent, raw replies)
+vibe --trace ...                 # write a JSONL record you can replay/grep/diff
+```
+
+Each step is logged as an **intent → action → observation** triple — what the
+model *said*, the tool call that became, and the result fed back in:
+
+```
+→ POST /api/chat  model=qwen2.5-coder:7b  msgs=3  tools=6
+← reply  prompt=412 tok  gen=58 tok  1.9s
+  reasoning: I'll read tasks.py first to see the list loop.
+  → read_file({"path": "tasks.py"})  (native)
+  ✓ read_file → 612 chars fed back
+decision: final answer — no tool calls
+```
+
+One thing to keep in mind: a small model's prose isn't always *why* it acted, so
+trust the **actions and their results** as ground truth and read the reasoning
+text as a hint.
+
 ## What's in the box
 
 | File | Role |
@@ -112,6 +142,7 @@ Small models are easy to trip up, so vibe makes a few deliberate choices:
 | [`vibe/llm/ollama.py`](vibe/llm/ollama.py) | talks to Ollama over HTTP |
 | [`vibe/tools/`](vibe/tools/) | the six tools the agent can use |
 | [`vibe/safety.py`](vibe/safety.py) | keeps file access inside the project |
+| [`vibe/trace.py`](vibe/trace.py) | the reasoning trace (live `-v` view + JSONL) |
 | [`vibe/ui/`](vibe/ui/) | the terminal chat, diffs, and slash commands |
 
 ## Configuration
